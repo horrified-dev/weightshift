@@ -25,6 +25,20 @@ The Hugging Face platform provides a variety of online tools for converting, qua
 - Use the [GGUF-editor space](https://huggingface.co/spaces/CISCai/gguf-editor) to edit GGUF meta data in the browser (more info: https://github.com/ggml-org/llama.cpp/discussions/9268)
 - Use the [Inference Endpoints](https://ui.endpoints.huggingface.co/) to directly host `llama.cpp` in the cloud (more info: https://github.com/ggml-org/llama.cpp/discussions/9669)
 
+## Quantizing during Hugging Face export
+
+WeightShift accepts K presets such as `q4_k_m` and `q5_k_m`, along with IQ and other native quantization presets. Build `llama-quantize` first.
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --target llama-quantize -j
+
+python convert_hf_to_gguf.py /path/to/checkpoint --outtype q4_k_m --outfile 'model-{FTYPE}.gguf'
+python convert_hf_to_gguf.py /path/to/checkpoint --mtp --outtype q5_k_m --outfile 'mtp-model-{FTYPE}.gguf'
+```
+
+The converter writes a temporary BF16 GGUF beside the destination, then runs the native quantizer for per-tensor type selection. Split boundaries are selected during the BF16 export and preserved during quantization. `--dry-run` still uses the temporary input to report the native quantization plan. Use `--quantizer /path/to/llama-quantize` for another build. Presets that require calibration accept `--imatrix /path/to/imatrix.gguf`.
+
 ## Exporting per-layer embeddings separately
 
 For models with a per-layer embedding (PLE) table, export the backbone and table from the same checkpoint:

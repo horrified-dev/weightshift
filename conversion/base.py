@@ -1719,7 +1719,7 @@ class ModelBase:
     def write_vocab(self):
         raise NotImplementedError("write_vocab() must be implemented in subclasses")
 
-    def write(self):
+    def write(self) -> gguf.GGUFWriter:
         self.prepare_tensors()
         if (self.ple_only or self.no_ple) and not self._has_ple:
             raise ValueError("model has no per-layer embedding table to export separately")
@@ -1728,6 +1728,7 @@ class ModelBase:
         self.gguf_writer.write_kv_data_to_file()
         self.gguf_writer.write_tensors_to_file(progress=True)
         self.gguf_writer.close()
+        return self.gguf_writer
 
     @staticmethod
     def get_model_part_names(dir_model: Path, prefix: str, suffix: str) -> list[str]:

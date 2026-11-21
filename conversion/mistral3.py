@@ -91,8 +91,8 @@ class Mistral3Model(TextModel):
     def write_vocab(self):
         self.impl.write_vocab()
 
-    def write(self):
-        self.impl.write()
+    def write(self) -> gguf.GGUFWriter:
+        return self.impl.write()
 
 
 @ModelBase.register("VoxtralRealtimeForConditionalGeneration")

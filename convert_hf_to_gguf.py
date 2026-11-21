@@ -4,9 +4,13 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import logging
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import torch
@@ -25,6 +29,81 @@ from conversion import (
     _mistral_common_installed,
     _mistral_import_error_msg,
 )
+
+DIRECT_FTYPES = {
+    "f32": gguf.LlamaFileType.ALL_F32,
+    "f16": gguf.LlamaFileType.MOSTLY_F16,
+    "bf16": gguf.LlamaFileType.MOSTLY_BF16,
+    "q8_0": gguf.LlamaFileType.MOSTLY_Q8_0,
+    "q4_0": gguf.LlamaFileType.MOSTLY_Q4_0,
+    "tq1_0": gguf.LlamaFileType.MOSTLY_TQ1_0,
+    "tq2_0": gguf.LlamaFileType.MOSTLY_TQ2_0,
+    "auto": gguf.LlamaFileType.GUESSED,
+}
+
+NATIVE_QUANTS = (
+    "q1_0", "q2_0", "q4_1", "q5_0", "q5_1",
+    "q2_k", "q2_k_s", "q3_k", "q3_k_s", "q3_k_m", "q3_k_l",
+    "q4_k", "q4_k_s", "q4_k_m", "q5_k", "q5_k_s", "q5_k_m", "q6_k",
+    "iq1_s", "iq1_m", "iq2_xxs", "iq2_xs", "iq2_s", "iq2_m",
+    "iq3_xxs", "iq3_xs", "iq3_s", "iq3_m", "iq4_nl", "iq4_xs",
+)
+
+
+def find_quantizer(explicit: str | None) -> str:
+    if explicit is not None:
+        if binary := shutil.which(explicit):
+            return binary
+        raise ValueError(f"llama-quantize is not executable at {explicit!r}")
+    repo = Path(__file__).resolve().parent
+    for candidate in (repo / "build/bin/llama-quantize", repo / "build/bin/Release/llama-quantize", "llama-quantize"):
+        if binary := shutil.which(str(candidate)):
+            return binary
+    raise ValueError("llama-quantize was not found. Build that target or pass --quantizer PATH.")
+
+
+def quantize_export(args: argparse.Namespace, binary: str, writer: gguf.GGUFWriter, destination: Path, stage: Path) -> Path:
+    assert writer.path is not None
+    if destination.is_dir():
+        stem = writer.path.stem.rsplit("-", 1)[0]
+        destination /= f"{stem}-{args.outtype.upper()}.gguf"
+    else:
+        destination = destination.with_name(gguf.fill_templated_filename(destination.name, args.outtype))
+
+    inputs = writer.format_shard_names(writer.path)
+    if any(path.is_file() and path not in inputs for path in stage.rglob("*")):
+        raise ValueError("native quantization expects a single model export without auxiliary files")
+
+    staged = stage / "quantized.gguf"
+    outputs = writer.format_shard_names(destination)
+    command = [binary]
+    if len(inputs) > 1:
+        command.append("--keep-split")
+    if args.imatrix is not None:
+        command.extend(("--imatrix", str(args.imatrix.resolve())))
+    if args.dry_run:
+        command.append("--dry-run")
+    else:
+        for path in outputs:
+            if path.exists() or path.is_symlink():
+                raise FileExistsError(f"output already exists: {path}")
+    command.extend((str(inputs[0]), str(staged), args.outtype.upper()))
+    subprocess.run(command, check=True)
+    if args.dry_run:
+        for path in outputs:
+            print(path)
+        return destination
+
+    published: list[Path] = []
+    try:
+        for source, path in zip(writer.format_shard_names(staged), outputs, strict=True):
+            os.link(source, path)
+            published.append(path)
+    except OSError:
+        for path in published:
+            path.unlink()
+        raise
+    return destination
 
 
 def split_str_to_n_bytes(split_str: str) -> int:
@@ -57,8 +136,17 @@ def parse_args() -> argparse.Namespace:
         help="path to write to; default: based on input. {ftype} will be replaced by the outtype.",
     )
     parser.add_argument(
-        "--outtype", type=str, choices=["f32", "f16", "bf16", "q8_0", "q4_0", "tq1_0", "tq2_0", "auto"], default="auto",
-        help="output format - use f32 for float32, f16 for float16, bf16 for bfloat16, q8_0 for Q8_0, q4_0 for Q4_0, tq1_0 or tq2_0 for ternary, and auto to preserve supported FP8 weights and otherwise select the highest-fidelity 16-bit float type",
+        "--outtype", type=str.lower, choices=(*DIRECT_FTYPES, *NATIVE_QUANTS), default="auto",
+        help="output format. auto preserves supported FP8 weights or selects a 16-bit float type. "
+             "K, IQ, and other additional presets use llama-quantize and require space for a temporary BF16 GGUF.",
+    )
+    parser.add_argument(
+        "--quantizer", type=str,
+        help="path to llama-quantize for native presets (default: LLAMA_QUANTIZE, the local build, or PATH)",
+    )
+    parser.add_argument(
+        "--imatrix", type=Path,
+        help="importance matrix for native quantization presets that use calibration",
     )
     parser.add_argument(
         "--bigendian", action="store_true",
@@ -95,7 +183,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="only print out a split plan and exit, without writing any new files",
+        help="print the plan and exit without writing output GGUF files",
     )
     parser.add_argument(
         "--no-tensor-first-split", action="store_true",
@@ -186,6 +274,13 @@ def parse_args() -> argparse.Namespace:
         parser.error("--ple-only / --no-ple cannot be combined with --vocab-only, --mmproj, --mtp, or --dspark")
     if args.ple_only and args.no_tensor_first_split:
         parser.error("--ple-only cannot be combined with --no-tensor-first-split")
+    if args.outtype in NATIVE_QUANTS:
+        if args.vocab_only or args.mmproj or args.bigendian:
+            parser.error("native presets require a little-endian text model export")
+        if args.imatrix is not None and not args.imatrix.is_file():
+            parser.error(f"importance matrix does not exist: {args.imatrix}")
+    elif args.quantizer is not None or args.imatrix is not None:
+        parser.error("--quantizer and --imatrix require a native --outtype preset")
     return args
 
 
@@ -222,16 +317,13 @@ def main() -> None:
         logger.error(f'Error: {dir_model} is not a directory')
         sys.exit(1)
 
-    ftype_map: dict[str, gguf.LlamaFileType] = {
-        "f32": gguf.LlamaFileType.ALL_F32,
-        "f16": gguf.LlamaFileType.MOSTLY_F16,
-        "bf16": gguf.LlamaFileType.MOSTLY_BF16,
-        "q8_0": gguf.LlamaFileType.MOSTLY_Q8_0,
-        "q4_0": gguf.LlamaFileType.MOSTLY_Q4_0,
-        "tq1_0": gguf.LlamaFileType.MOSTLY_TQ1_0,
-        "tq2_0": gguf.LlamaFileType.MOSTLY_TQ2_0,
-        "auto": gguf.LlamaFileType.GUESSED,
-    }
+    quantizer = None
+    if args.outtype in NATIVE_QUANTS:
+        try:
+            quantizer = find_quantizer(args.quantizer or os.getenv("LLAMA_QUANTIZE"))
+        except ValueError as err:
+            logger.error("%s", err)
+            sys.exit(1)
 
     is_split = args.split_max_tensors > 0 or args.split_max_size != "0"
     if args.use_temp_file and is_split:
@@ -253,8 +345,14 @@ def main() -> None:
         raise ImportError(_mistral_import_error_msg)
     disable_mistral_community_chat_template = args.disable_mistral_community_chat_template
 
-    with torch.inference_mode():
-        output_type = ftype_map[args.outtype]
+    with torch.inference_mode(), ExitStack() as resources:
+        output_type = DIRECT_FTYPES[args.outtype] if quantizer is None else gguf.LlamaFileType.MOSTLY_BF16
+        intermediate = fname_out
+        stage = None
+        if quantizer is not None:
+            output_dir = fname_out if fname_out.is_dir() else fname_out.parent
+            stage = Path(resources.enter_context(tempfile.TemporaryDirectory(prefix=".gguf-quant-", dir=output_dir))).resolve()
+            intermediate = stage if fname_out.is_dir() else stage / "intermediate.gguf"
         model_type = ModelType.MMPROJ if args.mmproj else ModelType.TEXT
         hparams = ModelBase.load_hparams(dir_model, is_mistral_format)
         if not is_mistral_format:
@@ -309,12 +407,12 @@ def main() -> None:
             if args.mtp:
                 model_class.mtp_only = True
 
-        model_instance = model_class(dir_model, output_type, fname_out,
+        model_instance = model_class(dir_model, output_type, intermediate,
                                      is_big_endian=args.bigendian, use_temp_file=args.use_temp_file,
                                      eager=args.no_lazy,
                                      metadata_override=args.metadata, model_name=args.model_name,
                                      split_max_tensors=args.split_max_tensors,
-                                     split_max_size=split_str_to_n_bytes(args.split_max_size), dry_run=args.dry_run,
+                                     split_max_size=split_str_to_n_bytes(args.split_max_size), dry_run=args.dry_run and quantizer is None,
                                      small_first_shard=args.no_tensor_first_split,
                                      remote_hf_model_id=hf_repo_id, disable_mistral_community_chat_template=disable_mistral_community_chat_template,
                                      sentence_transformers_dense_modules=args.sentence_transformers_dense_modules,
@@ -331,8 +429,18 @@ def main() -> None:
             logger.info(f"Model vocab successfully exported to {model_instance.fname_out}")
         else:
             logger.info("Exporting model...")
-            model_instance.write()
-            out_path = f"{model_instance.fname_out.parent}{os.sep}" if is_split else model_instance.fname_out
+            writer = model_instance.write()
+            final_path = model_instance.fname_out
+            if quantizer is not None:
+                assert stage is not None
+                try:
+                    final_path = quantize_export(args, quantizer, writer, fname_out, stage)
+                except (OSError, ValueError, subprocess.CalledProcessError) as err:
+                    logger.error("Quantized export failed: %s", err)
+                    sys.exit(1)
+                if args.dry_run:
+                    return
+            out_path = f"{final_path.parent}{os.sep}" if is_split else final_path
             logger.info(f"Model successfully exported to {out_path}")
 
 

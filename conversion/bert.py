@@ -559,13 +559,14 @@ class XLMRobertaModel(BertModel):
             if lora_prompt_prefixes:
                 lora_writer.add_string(gguf.Keys.Adapter.LORA_PROMPT_PREFIX, lora_prompt_prefixes[lora_name])
 
-    def write(self):
-        super().write()
+    def write(self) -> gguf.GGUFWriter:
+        writer = super().write()
         for lora_writer in self._lora_files.values():
             lora_writer.write_header_to_file()
             lora_writer.write_kv_data_to_file()
             lora_writer.write_tensors_to_file(progress=True)
             lora_writer.close()
+        return writer
 
 
 @ModelBase.register("JinaBertModel", "JinaBertForMaskedLM")
