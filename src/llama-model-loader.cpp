@@ -1180,14 +1180,9 @@ ggml_backend_buffer_type_t llama_model_loader::lazy_read::buft() {
     return ggml_backend_dev_buffer_type(cpu_dev);
 }
 
-bool llama_model_loader::lazy_read::add(const std::string & name, const ggml_tensor * t, const llama_tensor_weight * w) {
-    if (mode == LLAMA_LAZY_MODE_OFF) {
-        return false;
-    }
-
-    // do not lazy-read small tensors, it has significant overhead and is not worth it
+bool llama_model_loader::lazy_read::add(const std::string & name, const ggml_tensor * t, const llama_tensor_weight * w, bool force) {
     constexpr size_t auto_min_size = 4ull * 1024 * 1024 * 1024;
-    if (mode != LLAMA_LAZY_MODE_ON && ggml_nbytes(t) <= auto_min_size) {
+    if (!force && (mode == LLAMA_LAZY_MODE_OFF || (mode == LLAMA_LAZY_MODE_AUTO && ggml_nbytes(t) <= auto_min_size))) {
         return false;
     }
 
@@ -1199,6 +1194,10 @@ bool llama_model_loader::lazy_read::add(const std::string & name, const ggml_ten
 
     if (w) {
         ranges[w->idx].emplace_back(w->offs, w->offs + ggml_nbytes(t));
+        // Expert matrices are read in contiguous slices. Keep OS readahead for them.
+        if (!force) {
+            random_ranges[w->idx].push_back(ranges[w->idx].back());
+        }
         tensors.insert(name);
 
         LLAMA_LOG_INFO("%s: tensor %s (size = %zu MiB) lazy read enabled\n",
@@ -1434,9 +1433,13 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         return NULL;
     }
 
-    if (flags & TENSOR_READ_LAZY) {
-        // the decision must not depend on the load mode, or the memory-fit pass (no_alloc, no mmap)
-        is_lazy = lazy.add(tn.str(), cur, no_alloc ? nullptr : &require_weight(tn.str().c_str()));
+    const uint32_t n_paged_layers = hparams.n_layer_all - std::min(hparams.n_layer_all, lazy.ssd_keep_expert_layers);
+    const bool ssd_expert = lazy.ssd_experts && tn.bid >= 0 && uint32_t(tn.bid) < n_paged_layers &&
+                            cur->ne[2] > 1 && tn.suffix && strcmp(tn.suffix, "weight") == 0 &&
+                            llm_tensor_info_for(tn.tensor).op == GGML_OP_MUL_MAT_ID;
+    if ((flags & TENSOR_READ_LAZY) || ssd_expert) {
+        // Make the same placement decision during the no_alloc memory-fit pass.
+        is_lazy = lazy.add(tn.str(), cur, no_alloc ? nullptr : &require_weight(tn.str().c_str()), ssd_expert);
     }
 
     ggml_tensor t_meta = *cur;
@@ -1524,7 +1527,7 @@ void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps
             const size_t prefetch_size = prefetch && use_mmap ? -1 : 0;
 
             std::unique_ptr<llama_mmap> mapping = std::make_unique<llama_mmap>(file.get(), prefetch_size, is_numa,
-                    lazy.for_file(idx));
+                    lazy.for_file(idx), lazy.for_file(idx, /*random_only=*/ true));
             mmaps_used.emplace_back(mapping->size(), 0);
             if (mlock_mmaps) {
                 std::unique_ptr<llama_mlock> mlock_mmap(new llama_mlock());

@@ -896,6 +896,20 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
     // parse all CLI args now, so that -hf is available below for remote preset resolution
     parse_cli_args();
 
+    if (params.moe_keep_layers >= 0) {
+        if (params.split_mode == LLAMA_SPLIT_MODE_TENSOR) {
+            throw std::invalid_argument("--moe-keep-layers is incompatible with tensor split mode");
+        }
+        for (const auto & override : params.tensor_buft_overrides) {
+            if (override.buft && !ggml_backend_buft_is_host(override.buft)) {
+                throw std::invalid_argument("--moe-keep-layers is incompatible with tensor overrides to device memory");
+            }
+        }
+        if (params.moe_cache_size > 0) {
+            LOG_WRN("--moe-keep-layers disables the dynamic MoE cache to keep host experts out of VRAM\n");
+        }
+    }
+
     postprocess_cpu_params(params.cpuparams,       nullptr);
     postprocess_cpu_params(params.cpuparams_batch, &params.cpuparams);
 
@@ -2694,6 +2708,38 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             else { throw std::invalid_argument("invalid value"); }
         }
     ).set_env("LLAMA_ARG_LAZY_MODE"));
+    add_opt(common_arg(
+        {"--moe-expert-offload-nvme"},
+        "demand-page routed expert weights from the GGUF through CPU mappings; "
+        "use --no-warmup to defer initial expert reads",
+        [](common_params & params) {
+            params.ssd_experts = true;
+        }
+    ).set_env("LLAMA_ARG_SSD_EXPERTS"));
+    add_opt(common_arg(
+        {"--moe-keep-layers"}, "N",
+        "cap model layers in VRAM, counting the output layer like --gpu-layers (0 = CPU only); "
+        "use --moe-expert-offload-nvme to demand-page experts in the remaining layers",
+        [](common_params & params, const std::string & value) {
+            size_t end = 0;
+            const int n = std::stoi(value, &end);
+            if (n < 0 || end != value.size()) {
+                throw std::invalid_argument("expected a non-negative integer");
+            }
+            params.moe_keep_layers = n;
+        }
+    ).set_env("LLAMA_ARG_MOE_KEEP_LAYERS"));
+    add_opt(common_arg(
+        {"--ssd-keep-expert-layers"}, "N",
+        "enable SSD expert paging and keep normal placement for routed experts in the last N model blocks (default: 0)",
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("invalid value");
+            }
+            params.ssd_experts = true;
+            params.ssd_keep_expert_layers = value;
+        }
+    ).set_env("LLAMA_ARG_SSD_KEEP_EXPERT_LAYERS"));
     add_opt(common_arg(
         {"--numa"}, "TYPE",
         "attempt optimizations that help on some NUMA systems\n"

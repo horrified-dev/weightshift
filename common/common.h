@@ -512,6 +512,9 @@ struct common_params {
     enum llama_load_mode  load_mode  = LLAMA_LOAD_MODE_AUTO; // how to load the model
 
     enum llama_lazy_mode lazy_mode = LLAMA_LAZY_MODE_AUTO; // on-demand reading of tensors marked by the arch
+    bool ssd_experts = false;
+    uint32_t ssd_keep_expert_layers = 0;
+    int32_t moe_keep_layers = -1; // cap target GPU layers, including the output layer
 
     common_cpu_params cpuparams;
     common_cpu_params cpuparams_batch;

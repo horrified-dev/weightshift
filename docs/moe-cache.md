@@ -24,3 +24,31 @@ From these runs it fits the upload and CPU speeds of the machine, then replays t
 - **Server command:** keep your own arguments (`-t`, `-c`, expert placement, load mode); the speeds and the free device memory depend on them.
 - **`--max-mib N`:** tunes a smaller cache than what fits on the device. The runs in `--out` are reused while the command stays the same, so trying another value is instant.
 - **`--markdown`:** prints Markdown tables to paste in a PR.
+
+## SSD-backed experts
+
+Use `--moe-expert-offload-nvme --no-warmup` with a GGUF on SSD. The routed matrix weights
+remain in pageable CPU mappings of the original GGUF. Routing reads the needed
+expert slices through the operating system's page cache. Non-expert tensors use
+their normal placement. No separate expert file is needed. On Linux the loader
+skips startup prefetch for these weights and leaves kernel readahead enabled
+when the selected expert slices are first accessed.
+
+Use `--moe-keep-layers N` to cap the target model's GPU layer placement. Like
+`--gpu-layers`, this count includes the output layer. Use `0` for CPU-only
+weights. A lower explicit `--gpu-layers` still applies. The earlier layers stay
+on the host. With `--moe-expert-offload-nvme`, the routed expert matrices in those
+layers are demand-paged. This cap disables the dynamic MoE cache so it cannot
+copy expert weights from the host layers into VRAM.
+
+Use `--ssd-keep-expert-layers N` to keep normal placement for the last
+`N` model blocks and page routed experts in the earlier blocks. With GPU
+layer offload, the experts in those GPU blocks stay in VRAM. Keep enough
+room for the KV cache, compute buffers, and other GPU applications. If both
+layer options are set, `--moe-keep-layers` determines which blocks are paged.
+
+An expert page may stay in RAM until the operating system reclaims it. Cold
+expert reads can be much slower than reads from RAM, especially with large
+prompt batches. With a GPU, the existing MoE cache can retain hot experts in
+VRAM. Whole-file `mmap+mlock` and tensor split mode are incompatible. Using
+`--check-tensors` explicitly reads every tensor at startup.

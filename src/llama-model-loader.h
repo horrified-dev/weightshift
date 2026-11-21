@@ -87,10 +87,12 @@ struct llama_model_loader {
     struct lazy_read {
         // set by the caller before the create_tensor() calls
         enum llama_lazy_mode mode = LLAMA_LAZY_MODE_OFF;
+        bool ssd_experts = false;
+        uint32_t ssd_keep_expert_layers = 0;
 
         // decide whether this tensor is read lazily
         // pass w to also record it, or nullptr to only ask
-        bool add(const std::string & name, const ggml_tensor * t, const llama_tensor_weight * w);
+        bool add(const std::string & name, const ggml_tensor * t, const llama_tensor_weight * w, bool force);
 
         bool any() const {
             return !ranges.empty();
@@ -100,11 +102,12 @@ struct llama_model_loader {
             return tensors.count(ggml_get_name(t)) > 0;
         }
 
-        const llama_mmap::ranges & for_file(uint32_t idx) const {
+        const llama_mmap::ranges & for_file(uint32_t idx, bool random_only = false) const {
             static const llama_mmap::ranges none;
 
-            const auto it = ranges.find(idx);
-            return it == ranges.end() ? none : it->second;
+            const auto & file_ranges = random_only ? random_ranges : ranges;
+            const auto it = file_ranges.find(idx);
+            return it == file_ranges.end() ? none : it->second;
         }
 
         // lazy tensors are gathered on the host, so no offload setting applies to them
@@ -112,6 +115,7 @@ struct llama_model_loader {
 
     private:
         std::map<uint32_t, llama_mmap::ranges> ranges;
+        std::map<uint32_t, llama_mmap::ranges> random_ranges;
         std::set<std::string>                  tensors;
     } lazy;
 

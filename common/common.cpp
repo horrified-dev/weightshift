@@ -1700,6 +1700,18 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
     mparams.split_mode      = params.split_mode;
     mparams.load_mode       = params.load_mode;
     mparams.lazy_mode = params.lazy_mode;
+    mparams.ssd_experts = params.ssd_experts;
+    mparams.ssd_keep_expert_layers = params.ssd_keep_expert_layers;
+    if (params.moe_keep_layers >= 0) {
+        const bool cpu_only = (mparams.devices && !mparams.devices[0]) || !llama_supports_gpu_offload();
+        if (cpu_only) {
+            mparams.n_gpu_layers = 0;
+        } else if (mparams.n_gpu_layers < 0 || mparams.n_gpu_layers > params.moe_keep_layers) {
+            mparams.n_gpu_layers = params.moe_keep_layers;
+        }
+        // The output layer has no routed experts.
+        mparams.ssd_keep_expert_layers = std::max(mparams.n_gpu_layers - 1, 0);
+    }
     mparams.tensor_split    = params.tensor_split;
     mparams.check_tensors   = params.check_tensors;
     mparams.use_extra_bufts = !params.no_extra_bufts;
@@ -1776,7 +1788,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.type_k = params.cache_type_k;
     cparams.type_v = params.cache_type_v;
 
-    cparams.moe_cache_size      = params.moe_cache_size;
+    cparams.moe_cache_size      = params.moe_keep_layers >= 0 ? 0 : params.moe_cache_size;
     cparams.moe_cache_cpu_share = params.moe_cache_cpu_share;
 
     return cparams;

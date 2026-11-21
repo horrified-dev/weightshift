@@ -365,6 +365,9 @@ extern "C" {
         bool no_host;         // bypass host buffer allowing extra buffers to be used
         bool no_alloc;        // only load metadata and simulate memory allocations
         bool load_mtp;        // whether to load MTP layers
+        bool ssd_experts;     // demand-page routed expert weights from the GGUF
+
+        uint32_t ssd_keep_expert_layers; // with ssd_experts, keep normal placement for the last N blocks
     };
 
     struct llama_sampler_seq_config {

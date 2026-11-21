@@ -320,6 +320,19 @@ static std::pair<int, llama_model *> llama_model_load(struct gguf_context * meta
             params.check_tensors, params.no_alloc, params.load_mtp, params.kv_overrides, params.tensor_buft_overrides);
 
         ml.lazy.mode = params.lazy_mode;
+        if (params.ssd_experts) {
+            if (!llama_mmap::SUPPORTED || ml.files.empty()) {
+                throw std::runtime_error("SSD expert offload requires a memory-mappable GGUF file");
+            }
+            if (params.load_mode == LLAMA_LOAD_MODE_MMAP_MLOCK) {
+                throw std::runtime_error("SSD expert offload is incompatible with mmap+mlock");
+            }
+            if (params.split_mode == LLAMA_SPLIT_MODE_TENSOR) {
+                throw std::runtime_error("SSD expert offload is incompatible with tensor split mode");
+            }
+            ml.lazy.ssd_experts = true;
+            ml.lazy.ssd_keep_expert_layers = params.ssd_keep_expert_layers;
+        }
 
         ml.print_info();
         std::unique_ptr<llama_model> model_ptr(llama_model_create(ml, params));

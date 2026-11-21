@@ -1456,7 +1456,7 @@ llama_model::llama_model(const llama_model_params & params) : params(params), pi
         pimpl->tensor_split_owned.assign(params.tensor_split, params.tensor_split + llama_max_devices());
         this->params.tensor_split = pimpl->tensor_split_owned.data();
     }
-    pimpl->has_tensor_overrides = params.tensor_buft_overrides && params.tensor_buft_overrides[0].pattern;
+    pimpl->has_tensor_overrides = params.ssd_experts || (params.tensor_buft_overrides && params.tensor_buft_overrides[0].pattern);
 }
 
 llama_model::~llama_model() {
@@ -3602,6 +3602,8 @@ llama_model_params llama_model_default_params() {
         /*.no_host                     =*/ false,
         /*.no_alloc                    =*/ false,
         /*.load_mtp                    =*/ false,
+        /*.ssd_experts                 =*/ false,
+        /*.ssd_keep_expert_layers      =*/ 0,
     };
 
     return result;
